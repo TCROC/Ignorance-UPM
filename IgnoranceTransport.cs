@@ -10,6 +10,7 @@
 // at https://github.com/SoftwareGuy/Ignorance. Remember, OSS is the
 // way of the future!
 // ----------------------------------------
+
 using ENet;
 #if UNITY_EDITOR
 using Mirror.Ignorance.Editor;
@@ -39,6 +40,11 @@ namespace Mirror
         [Tooltip("How do you like your debug logs?")]
 #endif
         public TransportVerbosity m_TransportVerbosity = TransportVerbosity.Chatty;
+#if UNITY_EDITOR
+        [Tooltip("If enabled, Ignorance will use a new packet processing engine.")]
+        [Rename("New Packet Engine")]
+#endif
+        public bool m_UseNewPacketEngine = true;
 
 #if UNITY_EDITOR
         [Tooltip("If enabled, LZ4 Compression will be used to reduce packet data sizes.")]
@@ -137,6 +143,9 @@ namespace Mirror
         private int serverConnectionCnt = 1;
         #endregion
 
+        // -- Packet buffer -- //
+        // Reverted in v1.2.0 RC3. To be investigated and improved at a (unknown) later date.
+        // private byte[] m_PacketDataBuffer;
         #region Transport World Functions - Initialization & Deinitialization
         public IgnoranceTransport()
         {
@@ -312,6 +321,11 @@ namespace Mirror
                 m_Server.EnableCompression();
             }
 
+            if (m_UseNewPacketEngine)
+            {
+                Log("Ignorance Transport: Server instance will use the new multi-event-per-frame packet engine.");
+            }
+
             // Log our best effort attempts
             Log($"Ignorance Transport: Attempted to create server on UDP port {m_Port}. If Ignorance immediately crashes after this line, please file a bug report on the GitHub.");
         }
@@ -358,16 +372,6 @@ namespace Mirror
             Log("Ignorance Transport: Server stopped.");
         }
 
-        /// <summary>
-        /// Get a peer from their associated connection ID
-        /// </summary>
-        /// <param name="connectionID">The id of the Peer's connection</param>
-        /// <returns>The Peer</returns>
-        public Peer GetPeerByConnection(int connectionID)
-        {
-            return knownConnIDToPeers[connectionID];
-        }
-
         #endregion
 
         #region Transport - Outgoing Server Transmission Functions
@@ -402,7 +406,7 @@ namespace Mirror
 
             // This should fix that bloody AccessViolation
             // Issue reference: https://github.com/nxrighthere/ENet-CSharp/issues/28#issuecomment-436100923
-            mailingPigeon.Create(data.Array, data.Offset, data.Count + data.Offset, MapKnownChannelTypeToENETPacketFlag(m_ChannelDefinitions[channelId]));
+            mailingPigeon.Create(data.Array, data.Offset, data.Count, MapKnownChannelTypeToENETPacketFlag(m_ChannelDefinitions[channelId]));
 
             // More haxx. see https://github.com/nxrighthere/ENet-CSharp/issues/21 for some background info-ish.
             Peer target;
@@ -468,7 +472,16 @@ namespace Mirror
             clientAddress.SetHost(address);
             clientAddress.Port = m_Port;
 
+            if (m_UseNewPacketEngine)
+            {
+                Log("Ignorance Transport: Client will use new multi-event-per-frame packet engine.");
+            }
+
             // Connect the client to the server.
+            // 1.2.1: GODDAMNIT MATT, WHY DID YOU OMIT THE CHANNEL COUNT?!
+            // Also partially (like 1%) gonna blame NX, because documentation doesn't say anything about the second param
+            // having to match the channel count on the server, or how many channels the client will feature too.
+            // Don't hate me.
             m_ClientPeer = m_Client.Connect(clientAddress, m_ChannelDefinitions.Count);
 
             // Set the custom timeouts.
@@ -478,7 +491,7 @@ namespace Mirror
             }
 
             // Debugging only
-            if (m_TransportVerbosity >= TransportVerbosity.Paranoid)
+            if (m_TransportVerbosity > TransportVerbosity.Chatty)
             {
                 Log($"Ignorance Transport: Hey ENET, is our client peer is setup? ENET: {m_ClientPeer.IsSet}.");
             }
@@ -502,12 +515,7 @@ namespace Mirror
         /// </summary>
         public override void ClientDisconnect()
         {
-            // Bug fix by c6burns as per the Discord server
-            // ENET-CSharp doesn't track peers and does not guard against calls to Peer.Disconnect even if the array
-            // has been freed using enet_host_destroy
-            if (!IsValid(m_Client)) return; // c6: don't reference into peer without host
-
-            if (m_TransportVerbosity == TransportVerbosity.Paranoid)
+            if (m_TransportVerbosity >= TransportVerbosity.Paranoid)
             {
                 Log($"Ignorance Transport: Client peer state before disconnect request fires: {m_ClientPeer.State}");
             }
@@ -573,7 +581,7 @@ namespace Mirror
                 Log($"DEBUG: m_ChannelDefinitions[{channelId}] => { m_ChannelDefinitions[channelId] }");
             }
 
-            mailingPigeon.Create(data.Array, data.Offset, data.Count + data.Offset, MapKnownChannelTypeToENETPacketFlag(m_ChannelDefinitions[channelId]));
+            mailingPigeon.Create(data.Array, data.Offset, data.Count, MapKnownChannelTypeToENETPacketFlag(m_ChannelDefinitions[channelId]));
 
             if (m_TransportVerbosity > TransportVerbosity.Chatty)
             {
@@ -624,10 +632,108 @@ namespace Mirror
         /// Deprecated, old "classic" server-side message processor. One message per LateUpdate tick.
         /// </summary>
         /// <returns>True if successful, False if unsuccessful.</returns>
-        [Obsolete("This will throw exceptions because it's no longer part of Ignorance. Update your code to use NewServerMessageProcessor instead.")]
         public bool OldServerMessageProcessor()
         {
-            throw new Exception("OldServerMessageProcessor has been removed in Ignorance 1.2.3.");
+            if (!ServerActive())
+            {
+                if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden)
+                {
+                    LogError("Ignorance Transport: ProcessServerMessage was caught red-handed running when the server wasn't active.");
+                }
+
+                return false;
+            }
+
+            if (!m_Server.IsSet)
+            {
+                if (m_TransportVerbosity > TransportVerbosity.Chatty) LogWarning("Ignorance Transport: Server is not ready.");
+                return false;
+            }
+
+            int deadPeerConnID, knownConnectionID;
+            int newConnectionID = serverConnectionCnt;
+            Event incomingEvent;
+
+            // Get the next message...
+            m_Server.Service(0, out incomingEvent);
+
+            // What type is this?
+            switch (incomingEvent.Type)
+            {
+                // Connections (Normal peer connects)
+                case EventType.Connect:
+                    if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden)
+                    {
+                        Log($"Ignorance Transport: New connection with peer ID {incomingEvent.Peer.ID}, IP {incomingEvent.Peer.IP}");
+                    }
+
+                    // The peer object will allow us to do stuff with it later.
+                    // Map them in our dictionaries
+                    knownPeersToConnIDs.Add(incomingEvent.Peer, newConnectionID);
+                    knownConnIDToPeers.Add(newConnectionID, incomingEvent.Peer);
+
+                    if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden)
+                    {
+                        Log($"Ignorance Transport: New connection from IP {incomingEvent.Peer.ID}. Peer ID {incomingEvent.Peer.ID} mapped to internal connection ID {newConnectionID}");
+                    }
+
+                    // Increment the fake connection counter by one.
+                    serverConnectionCnt++;
+
+                    // If we're using custom timeouts, then set the timeouts too.
+                    if (m_UseCustomTimeout) incomingEvent.Peer.Timeout(Library.throttleScale, m_BasePeerTimeout, m_BasePeerTimeout * m_BasePeerMultiplier);
+
+                    // Report back saying we got a connection event.
+                    OnServerConnected.Invoke(newConnectionID);
+                    break;
+
+                // Disconnections (Normal peer disconnect and timeouts)
+                case EventType.Disconnect:
+                case EventType.Timeout:
+                    if (m_TransportVerbosity > TransportVerbosity.Chatty)
+                    {
+                        Log($"Ignorance Transport: ServerGetNextMessage(): {(incomingEvent.Type == EventType.Disconnect ? "disconnect" : "timeout")} event, peer ID {incomingEvent.Peer.ID}, IP {incomingEvent.Peer.IP}");
+                    }
+                    if (knownPeersToConnIDs.TryGetValue(incomingEvent.Peer, out deadPeerConnID))
+                    {
+                        Log($"Ignorance Transport: Acknowledging disconnection on connection ID {deadPeerConnID}");
+                        PeerDisconnectedInternal(incomingEvent.Peer);
+                        OnServerDisconnected.Invoke(deadPeerConnID);
+                    }
+                    break;
+
+                case EventType.Receive:
+                    if (m_TransportVerbosity > TransportVerbosity.Chatty)
+                    {
+                        Log($"Ignorance Transport: ServerGetNextMessage(): Channel {incomingEvent.ChannelID} receiving {incomingEvent.Packet.Length} byte payload");
+                    }
+
+                    // Only process data from known peers.
+                    if (knownPeersToConnIDs.TryGetValue(incomingEvent.Peer, out knownConnectionID))
+                    {
+                        NewMessageDataProcessor(incomingEvent.Packet, true, knownConnectionID);
+                    }
+                    else
+                    {
+                        // Emit a warning and clean the packet. We don't want it in memory.
+                        incomingEvent.Packet.Dispose();
+
+                        if (m_TransportVerbosity > TransportVerbosity.Chatty)
+                        {
+                            LogWarning("Ignorance Transport WARNING: Discarded a packet because it was from a unknown peer. If you see this message way too many times then you " +
+                                "are likely a victim of a DoS or DDoS attack that is targeting your server's connection port. Ignorance will keep discarding packets but please do " +
+                                "look into this. Failing to do so is risky and could potentially crash the server instance!");
+                        }
+                    }
+                    break;
+
+                case EventType.None:
+                    // Nothing happened. Do nothing.
+                    return false;
+            }
+
+            // We're done here. Bugger off.
+            return true;
         }
 
         /// <summary>
@@ -645,7 +751,11 @@ namespace Mirror
             if (!ServerActive()) return false;
 
             // Only process messages if the server is valid.
-            if (!IsValid(m_Server)) return false;
+            if (!IsValid(m_Server))
+            {
+                if (m_TransportVerbosity > TransportVerbosity.Chatty) LogWarning("Ignorance Transport: NewServerMessageProcessor() reports the server host object is not valid.");
+                return false;
+            }
 
             while (!serverWasPolled)
             {
@@ -747,7 +857,7 @@ namespace Mirror
             sourcePacket.CopyTo(dataBuf);
             sourcePacket.Dispose();
 
-            if (m_TransportVerbosity == TransportVerbosity.LogSpam) Log($"Ignorance Transport: Packet payload:\n{ BitConverter.ToString(dataBuf) }");
+            if (m_TransportVerbosity == TransportVerbosity.LogSpam) Log($"Ignorance Transport: Oi Mirror, data's arrived! Packet payload:\n{ BitConverter.ToString(dataBuf) }");
 
             // Invoke the server if we're supposed to.
             if (serverInvoke)
@@ -767,10 +877,72 @@ namespace Mirror
         /// <param name="transportEvent">The transport event to report back to Mirror.</param>
         /// <param name="data">The byte array of the data.</param>
         /// <returns></returns>
-        [Obsolete("This will throw exceptions because it's no longer part of Ignorance. Update your code to use NewServerMessageProcessor instead.")]
         public bool OldClientMessageProcessor()
         {
-            throw new Exception("OldClientMessageProcessor has been removed in Ignorance 1.2.3.");
+            // The incoming Enet Event.
+            Event incomingEvent;
+
+            // Safety check: if the client isn't created, then we shouldn't do anything. ENet might be warming up.
+            if (!IsValid(m_Client))
+            {
+                // LogWarning("Ignorance Transport: Hold on, the client is not ready yet.");
+                return false;
+            }
+
+            // Get the next message...
+            m_Client.Service(0, out incomingEvent);
+
+            // Debugging only
+            // if (verboseLoggingEnabled) Log($"ClientGetNextMessage event: {incomingEvent.Type}");
+
+            switch (incomingEvent.Type)
+            {
+                // Peer connects.
+                case EventType.Connect:
+                    if (m_TransportVerbosity > TransportVerbosity.Chatty)
+                    {
+                        Log($"Ignorance Transport: ClientGetNextMessage() connect; real ENET peerID {incomingEvent.Peer.ID}, address {incomingEvent.Peer.IP}");
+                    }
+                    else
+                    {
+                        Log($"Ignorance Transport: Connection established with {incomingEvent.Peer.IP} !");
+                    }
+
+                    // If we're using custom timeouts, then set the timeouts too.
+                    // 1.2.0+: TODO: Come back and check this out.
+                    // if (useCustomPeerTimeout) incomingEvent.Peer.Timeout(Library.throttleScale, peerBaseTimeout, peerBaseTimeout * peerBaseTimeoutMultiplier);
+                    OnClientConnected.Invoke();
+                    break;
+
+                // Peer disconnects/timeout.
+                case EventType.Disconnect:
+                case EventType.Timeout:
+                    // TODO: Should timeouts be a client error?
+                    if (m_TransportVerbosity > TransportVerbosity.Chatty)
+                    {
+                        Log($"Ignorance Transport: ClientGetNextMessage() {(incomingEvent.Type == EventType.Disconnect ? "disconnect" : "timeout")}, peerID {incomingEvent.Peer.ID}, address {incomingEvent.Peer.IP}");
+                    }
+                    else
+                    {
+                        LogWarning($"Ignorance Transport: Client encountered {(incomingEvent.Type == EventType.Disconnect ? "disconnection" : "timeout")}... Down we go!");
+                    }
+                    OnClientDisconnected.Invoke();
+                    break;
+                // Peer sends data to us.
+                case EventType.Receive:
+                    if (m_TransportVerbosity > TransportVerbosity.Chatty)
+                    {
+                        Log($"Ignorance Transport: Data channel {incomingEvent.ChannelID} receiving {incomingEvent.Packet.Length} byte payload...");
+                    }
+                    NewMessageDataProcessor(incomingEvent.Packet);
+                    break;
+
+                case EventType.None:
+                    return false;
+            }
+
+            // We're done here. Bugger off.
+            return true;
         }
 
         /// <summary>
@@ -896,8 +1068,19 @@ namespace Mirror
         {
             if (enabled)
             {
-                NewServerMessageProcessor();
-                NewClientMessageProcessor();
+                if (m_UseNewPacketEngine)
+                {
+                    NewServerMessageProcessor();
+                    NewClientMessageProcessor();
+                }
+                else
+                {
+                    // note: we need to check enabled in case we set it to false
+                    // when LateUpdate already started.
+                    // (https://github.com/vis2k/Mirror/pull/379) 
+                    while (enabled && OldServerMessageProcessor()) ;
+                    while (enabled && OldClientMessageProcessor()) ;
+                }
             }
         }
 
@@ -907,13 +1090,13 @@ namespace Mirror
             if (m_ChannelDefinitions.Count >= 2)
             {
                 // Check to make sure that Channel 0 and 1 are correct.
-                if (m_ChannelDefinitions[0] != KnownChannelTypes.Reliable)
+                if(m_ChannelDefinitions[0] != KnownChannelTypes.Reliable)
                 {
                     LogWarning("Ignorance Transport detected that channel 0 is not set to Reliable. This has been corrected.");
                     m_ChannelDefinitions[0] = KnownChannelTypes.Reliable;
                 }
 
-                if (m_ChannelDefinitions[1] != KnownChannelTypes.Unreliable)
+                if(m_ChannelDefinitions[1] != KnownChannelTypes.Unreliable)
                 {
                     LogWarning("Ignorance Transport detected that channel 1 is not set to Unreliable. This has been corrected.");
                     m_ChannelDefinitions[1] = KnownChannelTypes.Unreliable;
@@ -1028,8 +1211,6 @@ namespace Mirror
             {
                 case KnownChannelTypes.Reliable:
                     return PacketFlags.Reliable;            // reliable (tcp-like).
-                case KnownChannelTypes.ReliableUnsequenced:
-                    return (PacketFlags.Reliable | PacketFlags.Unsequenced);    //reliable, but unsequenced
                 case KnownChannelTypes.Unreliable:
                     return PacketFlags.Unsequenced;         // completely unreliable.
                 case KnownChannelTypes.UnreliableFragmented:
@@ -1053,7 +1234,7 @@ namespace Mirror
 
         public class TransportInfo
         {
-            public const string Version = "1.2.3";
+            public const string Version = "1.2.1 In-Development";
         }
         #endregion
 
@@ -1061,10 +1242,20 @@ namespace Mirror
         public enum KnownChannelTypes
         {
             Reliable,
-            ReliableUnsequenced,
             Unreliable,
             UnreliableFragmented,
             UnreliableSequenced,
         }
+    }
+
+    public static class IgnoranceExtensions
+    {
+        public static T[] SubArray<T>(this T[] data, int index, int length)
+        {
+            T[] result = new T[length];
+            Array.Copy(data, index, result, 0, length);
+            return result;
+        }
+
     }
 }
