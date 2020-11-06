@@ -50,6 +50,17 @@ jobs:
           if $doContinue; then
             continue
           fi
+          for excludedPrefix in $EXCLUDED_PREFIXES
+          do
+            if [[ "$excludedPrefix" != "" && "$theirTag" == "$excludedPrefix"* ]]; then
+              echo $"their tag $theirTag contains excluded prefix $excludedPrefix. Skipping."
+              doContinue=true
+              break
+            fi
+          done
+          if $doContinue; then
+            continue
+          fi
           for requiredSubstring in $REQUIRED_SUBSTRINGS
           do
             if [[ "$requiredSubstring" != "" && "$theirTag" != *"$requiredSubstring"* ]]; then
@@ -112,6 +123,7 @@ jobs:
         UPM_FOLDER_CONTENTS: "Assets/Mirror/Runtime/Transport/Ignorance"
         UPM_BRANCH: releases/upm
         REQUIRED_PREFIXES: "v"
+        EXCLUDED_PREFIXES: "v1.0 v1.1" 
         REQUIRED_SUBSTRINGS: ""
         EXCLUDED_SUBSTRINGS: ""
       shell: bash
