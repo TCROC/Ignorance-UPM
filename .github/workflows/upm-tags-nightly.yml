@@ -83,7 +83,7 @@ jobs:
           if $doContinue; then
             continue
           fi
-          tagToVersion="${theirTag//[!0-9-.]/}"
+          tagToVersion="${theirTag#$PREFIX_TO_REMOVE}"
           if [[ "$myTags" == *"$tagToVersion"* ]]; then
             echo "Already released tag: $tagToVersion. Skipping"
             continue
@@ -126,4 +126,5 @@ jobs:
         EXCLUDED_PREFIXES: "v1.0 v1.1 v1.2.0" 
         REQUIRED_SUBSTRINGS: ""
         EXCLUDED_SUBSTRINGS: ""
+        PREFIX_TO_REMOVE: "v"
       shell: bash
