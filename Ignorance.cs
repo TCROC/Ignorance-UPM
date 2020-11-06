@@ -10,16 +10,23 @@ namespace Mirror
     public class Ignorance : Transport, ISegmentTransport
     {
         // debug
+        [Header("Debug Options")]
         public bool DebugEnabled = false;
         // server bind to all and addresses
+        [Header("Server Binding")]
         public bool ServerBindAll = true;
         public string ServerBindAddress = "127.0.0.1";
+        [Header("Connection Port")]
         public int CommunicationPort = 7777;
         // maximum packet sizes
-        public int MaxPacketSize = 64;
+        [Header("Security")]
+        [UnityEngine.Serialization.FormerlySerializedAs("MaxPacketSize")]
+        public int MaxPacketSizeInKb = 64;
         // Channels
+        [Header("Channel Definitions")]
         public ChannelTypes[] Channels;
         // custom peer limits
+        [Header("Custom Peer and Timeout Settings")]
         public bool CustomMaxPeerLimit = false;
         public int CustomMaxPeers = 1000;
         // custom timeouts
@@ -27,10 +34,12 @@ namespace Mirror
         public uint CustomTimeoutBaseTicks = 5000;
         public uint CustomTimeoutMultiplier = 3;
         // ping calculation timer
+        [Header("Ping Calculation")]
         public bool PingCalculationEnabled = true;
         public int PingCalculationFrameTimer = 120;    // assuming 60 frames per second, 2 second interval.
+
         // version of this transport
-        private readonly string Version = "1.3.0 RC 2";
+        private readonly string Version = "1.3.0";
         // enet engine related things
         private bool ENETInitialized = false, ServerStarted = false, ClientStarted = false;
         private Host ENETHost = new Host(), ENETClientHost = new Host();                    // Didn't want to have to do this but i don't want to risk crashes.
@@ -43,8 +52,7 @@ namespace Mirror
         private byte[] PacketCache;
         private int NextConnectionID = 1;   // DO NOT MODIFY.
         // used for latency calculation
-        private int PingCalculationFrames = 0;
-        private int CurrentClientPing = 0;
+        private int PingCalculationFrames = 0, CurrentClientPing = 0;
 
         #region Client
         public override void ClientConnect(string address)
@@ -77,7 +85,7 @@ namespace Mirror
                 return;
             }
 
-            if (ENETClientHost == null || !ENETClientHost.IsSet) ENETClientHost.Create(null, 1, Channels.Length);
+            if (ENETClientHost == null || !ENETClientHost.IsSet) ENETClientHost.Create(null, 1, Channels.Length, 0, 0, PacketCache.Length);
             if (DebugEnabled) Debug.Log($"Ignorance: DEBUGGING MODE - Created ENET Host object");
 
             ENETAddress.SetHost(address);
@@ -255,7 +263,9 @@ namespace Mirror
             if (ENETHost == null || !ENETHost.IsSet) ENETHost = new Host();
 
             // Go go go! Clear those corners!
-            ENETHost.Create(ENETAddress, CustomMaxPeerLimit ? CustomMaxPeers : (int)Library.maxPeers, Channels.Length, 0, 0);
+            // Fun fact: The author of the ENET Wrapper implemented packet size limits in ENET after we implemented them in Mirror.
+            // *thinking emoji*
+            ENETHost.Create(ENETAddress, CustomMaxPeerLimit ? CustomMaxPeers : (int)Library.maxPeers, Channels.Length, 0, 0, PacketCache.Length);
 
             if (DebugEnabled) Debug.Log($"Ignorance: DEBUGGING MODE - Server should be created now... If Ignorance immediately crashes after this line, please file a bug report on the GitHub.");
             ServerStarted = true;
@@ -269,7 +279,7 @@ namespace Mirror
                 Debug.Log("Ignorance: Cleaning the packet cache...");
             }
 
-            PacketCache = new byte[MaxPacketSize * 1024];
+            PacketCache = new byte[MaxPacketSizeInKb * 1024];
 
             if (DebugEnabled) Debug.Log("Ignorance: Cleaning up lookup dictonaries");
             ConnectionIDToPeers.Clear();
@@ -299,8 +309,8 @@ namespace Mirror
         #region Core Transport
         private bool InitializeENET()
         {
-            PacketCache = new byte[MaxPacketSize * 1024];
-            if (DebugEnabled) Debug.Log($"Initialized new packet cache, {MaxPacketSize * 1024} bytes capacity.");
+            PacketCache = new byte[MaxPacketSizeInKb * 1024];
+            if (DebugEnabled) Debug.Log($"Initialized new packet cache, {MaxPacketSizeInKb * 1024} bytes capacity.");
 
             return Library.Initialize();
         }
@@ -472,7 +482,7 @@ namespace Mirror
             Reliable = PacketFlags.Reliable,
             ReliableUnsequenced = PacketFlags.Reliable | PacketFlags.Unsequenced,
             Unreliable = PacketFlags.Unsequenced,
-            UnreliableFragmented = PacketFlags.UnreliableFragment,
+            UnreliableFragmented = PacketFlags.UnreliableFragmented,
             UnreliableSequenced = PacketFlags.None
         }
 
@@ -493,6 +503,7 @@ namespace Mirror
                     {
                         if (!ENETPeer.IsSet || !IsValid(ENETClientHost)) CurrentClientPing = 0;
                         else CurrentClientPing = (int)ENETPeer.RoundTripTime;
+						PingCalculationFrames = 0;
                     }
                 }
 
