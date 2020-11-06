@@ -123,7 +123,7 @@ jobs:
         UPM_FOLDER_CONTENTS: "Assets/Mirror/Runtime/Transport/Ignorance"
         UPM_BRANCH: releases/upm
         REQUIRED_PREFIXES: "v"
-        EXCLUDED_PREFIXES: "v1.0 v1.1" 
+        EXCLUDED_PREFIXES: "v1.0 v1.1 v1.2.0" 
         REQUIRED_SUBSTRINGS: ""
         EXCLUDED_SUBSTRINGS: ""
       shell: bash
