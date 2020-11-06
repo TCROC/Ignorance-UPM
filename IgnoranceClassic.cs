@@ -62,7 +62,7 @@ namespace Mirror
         public int PingCalculationFrameTimer = 120;    // assuming 60 frames per second, 2 second interval.
 
         // version of this transport
-        private readonly string Version = "1.3.2";
+        private readonly string Version = "1.3.5";
         // enet engine related things
         private bool ENETInitialized = false, ServerStarted = false, ClientStarted = false;
         private Host ENETHost = new Host(), ENETClientHost = new Host();                    // Didn't want to have to do this but i don't want to risk crashes.
@@ -80,9 +80,6 @@ namespace Mirror
         #region Client
         public override void ClientConnect(string address)
         {
-            // test
-            Debug.LogError($"{Time.unscaledTime} | ClientConnect");
-
             if (!ENETInitialized)
             {
                 if (InitializeENET())
@@ -151,36 +148,9 @@ namespace Mirror
             }
         }
 
-#if !MIRROR_4_0_OR_NEWER
-        public override bool ClientSend(int channelId, byte[] data)
-        {
-            // redirect it to the ArraySegment version.
-            return ClientSend(channelId, new ArraySegment<byte>(data));
-        }
-#endif
-
         public override bool ClientSend(int channelId, ArraySegment<byte> data)
         {
-            if (!ENETClientHost.IsSet) return false;
-            if (channelId > Channels.Length)
-            {
-                Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
-                return false;
-            }
-
-            Packet payload = default;
-            payload.Create(data.Array, data.Offset, data.Count + data.Offset, (PacketFlags)Channels[channelId]);
-            int returnCode = ENETPeer.SendAndReturnStatusCode((byte)channelId, ref payload);
-            if (returnCode == 0)
-            {
-                if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Outgoing packet on channel {channelId} OK");
-                return true;
-            }
-            else
-            {
-                if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Outgoing packet on channel {channelId} FAIL, code {returnCode}");
-                return false;
-            }
+            return ENETClientSendInternal(channelId, data);
         }
 
         public string GetClientPing()
@@ -189,7 +159,6 @@ namespace Mirror
         }
         #endregion
 
-        // TODO: Check this out.
         public override int GetMaxPacketSize(int channelId = 0)
         {
             return PacketCache.Length;
@@ -218,13 +187,7 @@ namespace Mirror
             else return "UNKNOWN";
         }
 
-#if !MIRROR_4_0_OR_NEWER
-        public override bool ServerSend(int connectionId, int channelId, byte[] data)
-        {
-            return ServerSend(connectionId, channelId, new ArraySegment<byte>(data));
-        }
-#endif
-
+        // Can't deprecate this because I believe Dissonance uses it still...
         public bool ServerSend(int connectionId, int channelId, ArraySegment<byte> data)
         {
             if (!ENETHost.IsSet) return false;
@@ -450,11 +413,7 @@ namespace Mirror
                                 networkEvent.Packet.CopyTo(PacketCache);
                                 int spLength = networkEvent.Packet.Length;
                                 networkEvent.Packet.Dispose();
-#if MIRROR_4_0_OR_NEWER
                                 OnServerDataReceived.Invoke(knownConnectionID, new ArraySegment<byte>(PacketCache, 0, spLength), networkEvent.ChannelID);
-#else
-                                OnServerDataReceived?.Invoke(knownConnectionID, new ArraySegment<byte>(PacketCache, 0, spLength));
-#endif
                             }
                         }
                         else
@@ -503,14 +462,11 @@ namespace Mirror
                 {
                     case EventType.Connect:
                         // Client connected.
-                        // Debug.Log("Connect");
-                        Debug.LogError($"{Time.unscaledTime} | Client Connected");
                         OnClientConnected.Invoke();
                         break;
                     case EventType.Timeout:
                     case EventType.Disconnect:
                         // Client disconnected.
-                        // Debug.Log("Disconnect");
                         OnClientDisconnected.Invoke();
                         break;
                     case EventType.Receive:
@@ -527,11 +483,7 @@ namespace Mirror
                             networkEvent.Packet.CopyTo(PacketCache);
                             int spLength = networkEvent.Packet.Length;
                             networkEvent.Packet.Dispose();
-#if MIRROR_4_0_OR_NEWER
                             OnClientDataReceived.Invoke(new ArraySegment<byte>(PacketCache, 0, spLength), networkEvent.ChannelID);
-#else
-                            OnClientDataReceived.Invoke(new ArraySegment<byte>(PacketCache, 0, spLength));
-#endif
                         }
                         break;
                 }
@@ -545,7 +497,7 @@ namespace Mirror
         {
             return host != null && host.IsSet;
         }
-#endregion
+        #endregion
 
         // -> Moved ChannelTypes enum to it's own file, so it's easier to maintain.
 
@@ -575,28 +527,27 @@ namespace Mirror
             }
         }
 
+        public override bool Available()
+        {
+#if UNITY_WEBGL || UNITY_WSA
+            // Ignorance is not available on these platforms.
+            return false;
+#else
+            return true;
+#endif
+        }
+
         public override string ToString()
         {
             // A little complicated if else mess.
-            if (ServerActive() && NetworkClient.active)
+            if (ServerActive())
             {
-                // HostClient Mode
-                return $"Ignorance {Version} in HostClient Mode";
-            }
-            else if (ServerActive() && !NetworkClient.active)
-            {
-                // Dedicated server masterrace mode
-                return $"Ignorance {Version} in Dedicated Server Mode";
-            }
-            else if (!ServerActive() && NetworkClient.active)
-            {
-                // Client mode
-                return $"Ignorance {Version} in Client Mode";
+                if (NetworkClient.active) return $"Ignorance {Version} in HostClient Mode";      // HostClient Mode
+                else return $"Ignorance {Version} in Dedicated Server Mode";                    // Dedicated server masterrace mode
             }
             else
             {
-                // Unknown state. How did that happen?
-                return $"Ignorance {Version} disconnected/unknown state";
+                return $"Ignorance {Version} in Client Mode";                                   // Client mode
             }
         }
 
@@ -619,50 +570,49 @@ namespace Mirror
             }
         }
 
-#if MIRROR_4_0_OR_NEWER
+        // Mirror 4.x specific: ServerSend to more than one connection id
         public override bool ServerSend(List<int> connectionIds, int channelId, ArraySegment<byte> segment)
         {
             if (!ENETHost.IsSet) return false;
 
-            foreach(int conn in connectionIds) {
+            foreach (int conn in connectionIds)
+            {
                 // Cheeky hack?
                 ServerSend(conn, channelId, segment);
-
-                /*
-                Packet payload = default;
-
-                if (channelId > Channels.Length)
-                {
-                    Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
-                    return false;
-                }
-
-                if (ConnectionIDToPeers.TryGetValue(connectionId, out Peer targetPeer))
-                {
-                    payload.Create(data.Array, data.Offset, data.Count + data.Offset, (PacketFlags)Channels[channelId]);
-                    int returnCode = targetPeer.SendAndReturnStatusCode((byte)channelId, ref payload));
-                    if (returnCode == 0)
-                    {
-                        // Success.
-                        if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Outgoing packet on channel {channelId} to connection {connectionId} OK!");
-                        return true;
-                    }
-                    else
-                    {
-                        if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Outgoing packet on channel {channelId} to connection {connectionId} FAIL! (Code {returnCode})");
-                        return false;
-                    }
-                }
-                else
-                {
-                    if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Unknown connection id {connectionId}");
-                    return false;
-                }
-                */
             }
 
             return true;
         }
-#endif
+
+        /// <summary>
+        /// Interal function used by the transport to carry data to the actual sending functions of the wrapper.
+        /// Hopefully should make it easier to fix things.
+        /// </summary>
+        /// <param name="channelId">The channel id you wish to send the packet on. Must be within 0 and the count of the channels array.</param>
+        /// <param name="dataPayload">The array segment containing the data to send to ENET.</param>
+        /// <returns></returns>
+        private bool ENETClientSendInternal(int channelId, ArraySegment<byte> dataPayload)
+        {
+            if (!ENETClientHost.IsSet) return false;
+            if (channelId > Channels.Length)
+            {
+                Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
+                return false;
+            }
+
+            Packet payload = default;
+            payload.Create(dataPayload.Array, dataPayload.Offset, dataPayload.Count + dataPayload.Offset, (PacketFlags)Channels[channelId]);
+            int returnCode = ENETPeer.SendAndReturnStatusCode((byte)channelId, ref payload);
+            if (returnCode == 0)
+            {
+                if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Outgoing packet on channel {channelId} OK");
+                return true;
+            }
+            else
+            {
+                if (DebugEnabled) Debug.Log($"[DEBUGGING MODE] Ignorance: Outgoing packet on channel {channelId} FAIL, code {returnCode}");
+                return false;
+            }
+        }
     }
 }

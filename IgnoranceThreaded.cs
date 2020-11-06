@@ -13,16 +13,15 @@
 // Use with caution.
 // -----------------
 
-using UnityEngine;
-using System.Collections;
 using System;
-using Debug = UnityEngine.Debug;
-using System.Threading;
-using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.Threading;
 using ENet;
+using UnityEngine;
+using Debug = UnityEngine.Debug;
 using Event = ENet.Event;
 using EventType = ENet.EventType;
+// Mirror 4.0 Specific.
 using System.Collections.Generic;
 
 namespace Mirror
@@ -34,8 +33,8 @@ namespace Mirror
         static ConcurrentQueue<OutgoingPacket> MirrorClientOutgoingQueue = new ConcurrentQueue<OutgoingPacket>();
 
         // Server Queues
-        static ConcurrentQueue<IncomingPacket> MirrorIncomingQueue = new ConcurrentQueue<IncomingPacket>();    // queue going into mirror from clients.
-        static ConcurrentQueue<OutgoingPacket> MirrorOutgoingQueue = new ConcurrentQueue<OutgoingPacket>();    // queue going to clients from Mirror.
+        static ConcurrentQueue<IncomingPacket> MirrorServerIncomingQueue = new ConcurrentQueue<IncomingPacket>();    // queue going into mirror from clients.
+        static ConcurrentQueue<OutgoingPacket> MirrorServerOutgoingQueue = new ConcurrentQueue<OutgoingPacket>();    // queue going to clients from Mirror.
 
         // lookup and reverse lookup dictionaries
         static ConcurrentDictionary<int, Peer> ConnectionIDToPeers = new ConcurrentDictionary<int, Peer>();
@@ -52,13 +51,8 @@ namespace Mirror
         static volatile bool isClientConnected = false;
         static volatile string clientConnectionAddress = string.Empty;
 
-
-        // private byte[] ClientPacketCache;
         // Standard stuffs
-
         private bool ENETInitialized = false;
-
-
         // Properties
         public bool DebugEnabled;
 
@@ -91,9 +85,19 @@ namespace Mirror
             }
         }
 
+        public override bool Available()
+        {
+#if UNITY_WEBGL || UNITY_WSA
+            // Ignorance is not available on these platforms.
+            return false;
+#else
+            return true;
+#endif
+        }
+
         public override string ToString()
         {
-            return "Ignorance Threaded Edition";
+            return "Ignorance Threaded";
         }
 
         public void LateUpdate()
@@ -115,9 +119,8 @@ namespace Mirror
         private bool ProcessServerMessages()
         {
             // Get to the queue! Check those corners!
-            while (MirrorIncomingQueue.TryDequeue(out IncomingPacket pkt))
-            {
-                // print($"Firing a packet with type: {pkt.type} for connection ID: {pkt.connectionId}\n{(pkt.data == null ? "NO DATA" : BitConverter.ToString(pkt.data))}");
+            while (MirrorServerIncomingQueue.TryDequeue(out IncomingPacket pkt))
+            {                
                 switch (pkt.type)
                 {
                     case MirrorPacketType.ServerClientConnected:
@@ -127,11 +130,7 @@ namespace Mirror
                         OnServerDisconnected?.Invoke(pkt.connectionId);
                         break;
                     case MirrorPacketType.ServerClientSentData:
-#if MIRROR_4_0_OR_NEWER
                         OnServerDataReceived?.Invoke(pkt.connectionId, new ArraySegment<byte>(pkt.data), pkt.channelId);
-#else
-                        OnServerDataReceived?.Invoke(pkt.connectionId, new ArraySegment<byte>(pkt.data));
-#endif
                         break;
                     default:
                         // Nothing to see here.
@@ -143,7 +142,7 @@ namespace Mirror
             return true;
         }
 
-        #region Client Portion
+#region Client Portion
         private bool ProcessClientMessages()
         {
             while (MirrorClientIncomingQueue.TryDequeue(out IncomingPacket pkt))
@@ -161,11 +160,7 @@ namespace Mirror
                         OnClientDisconnected?.Invoke();
                         break;
                     case MirrorPacketType.ClientGotData:
-#if MIRROR_4_0_OR_NEWER
                         OnClientDataReceived?.Invoke(new ArraySegment<byte>(pkt.data), pkt.channelId);
-#else
-                        OnClientDataReceived?.Invoke(new ArraySegment<byte>(pkt.data), pkt.channelId);
-#endif
                         break;
                 }
             }
@@ -225,35 +220,11 @@ namespace Mirror
             clientWorker.Start();
         }
 
-#if MIRROR_4_0_OR_NEWER
-        public override bool ClientSend(int channelId, ArraySegment<byte> data) {
-            if (channelId > Channels.Length)
-            {
-                Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
-                return false;
-            }
-
-            OutgoingPacket opkt = default;
-            opkt.channelId = (byte)channelId;
-
-            Packet payload = default;
-            payload.Create(data.Array, data.Offset, data.Count + data.Offset, (PacketFlags)Channels[channelId]);
-
-            opkt.payload = payload;
-
-            // Enqueue it.
-            MirrorClientOutgoingQueue.Enqueue(opkt);
-
-            return true;
-        }
-
-#else
-        public override bool ClientSend(int channelId, byte[] data)
+        // Client Sending: ArraySegment and classic byte array versions
+        public override bool ClientSend(int channelId, ArraySegment<byte> data)
         {
-            // redirect it to the ArraySegment version.
-            return ClientSend(channelId, new ArraySegment<byte>(data));
+            return ENETClientQueueInternal(channelId, data);
         }
-#endif
 
         public override void ClientDisconnect()
         {
@@ -271,9 +242,9 @@ namespace Mirror
 
             // ...
         }
-        #endregion
+#endregion
 
-        #region Server Portion
+#region Server Portion
         public override bool ServerActive()
         {
             return ServerStarted;
@@ -288,38 +259,12 @@ namespace Mirror
             serverWorker.Start();
         }
 
-#if !MIRROR_4_0_OR_NEWER
-        public override bool ServerSend(int connectionId, int channelId, byte[] data)
-        {
-            return ServerSend(connectionId, channelId, new ArraySegment<byte>(data));
-        }
-#endif
+        // Can't deprecate this due to Dissonance...
         public bool ServerSend(int connectionId, int channelId, ArraySegment<byte> data)
         {
-            if (!ServerStarted)
-            {
-                Debug.LogError("Attempted to send while the server was not active");
-                return false;
-            }
-
-            if (channelId > Channels.Length)
-            {
-                Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
-                return false;
-            }
-
-            OutgoingPacket op = default;
-            op.connectionId = connectionId;
-            op.channelId = (byte)channelId;
-
-            Packet dataPayload = default;
-            dataPayload.Create(data.Array, data.Offset, data.Count + data.Offset, (PacketFlags)Channels[channelId]);
-
-            op.payload = dataPayload;
-
-            MirrorOutgoingQueue.Enqueue(op);
-            return true;
+            return ENETServerQueueInternal(connectionId, channelId, data);
         }
+
         public override bool ServerDisconnect(int connectionId)
         {
             OutgoingPacket op = default;
@@ -342,12 +287,12 @@ namespace Mirror
             // IMPORTANT: Flush the queues. Get rid of the dead bodies.
             // c6: Do not use new, instead just while dequeue anything else in the queue
             // c6: helps avoid GC
-            while (MirrorIncomingQueue.TryDequeue(out _))
+            while (MirrorServerIncomingQueue.TryDequeue(out _))
             {
                 ;
             }
 
-            while (MirrorOutgoingQueue.TryDequeue(out _))
+            while (MirrorServerOutgoingQueue.TryDequeue(out _))
             {
                 ;
             }
@@ -366,31 +311,38 @@ namespace Mirror
             if (ENETInitialized) Library.Deinitialize();
             ENETInitialized = false;
         }
-        #endregion
+#endregion
 
-        #region General Purpose
+#region General Purpose
         public override int GetMaxPacketSize(int channelId = 0)
         {
             return MaxPacketSizeInKb * 1024;
         }
+#endregion
 
-        // utility
-        private bool IsValid(Host host)
-        {
-            return host != null && host.IsSet;
-        }
-        #endregion
-
-        #region Client Threading
+#region Client Threading
         private Thread IgnoranceClientThread()
         {
-            Thread t = new Thread(() => ClientWorker(clientConnectionAddress, (ushort)CommunicationPort, Channels.Length, MaxPacketSizeInKb * 1024, EnetPollTimeout));
+            ThreadBootstrapStruct threadBootstrap = new ThreadBootstrapStruct
+            {
+                hostAddress = clientConnectionAddress,
+                port = (ushort)CommunicationPort,
+                maxChannels = Channels.Length,
+                maxPacketSize = MaxPacketSizeInKb * 1024,
+                threadPumpTimeout = EnetPollTimeout
+            };
+
+            Thread t = new Thread(() => ClientWorkerThread(threadBootstrap));
             return t;
         }
 
-        private static void ClientWorker(string hostAddress, ushort port, int channelCount, int maxPacketSize = 16384, int serviceTimeout = 1)
+        private static void ClientWorkerThread(ThreadBootstrapStruct startupInfo)
         {
-            // Drain anything in the queue...
+            // Setup...
+            byte[] workerPacketBuffer = new byte[startupInfo.maxPacketSize];
+            Address cAddress = new Address();
+
+            // Drain anything in the queues...
             while (MirrorClientIncomingQueue.TryDequeue(out _))
             {
                 ;
@@ -401,26 +353,25 @@ namespace Mirror
                 ;
             }
 
-            byte[] workerPacketBuffer = new byte[maxPacketSize];
-            Address cAddress = new Address();
-
+            //
             using (Host cHost = new Host())
             {
                 try
                 {
-                    cHost.Create(null, 1, channelCount, 0, 0, maxPacketSize);
+                    cHost.Create(null, 1, startupInfo.maxChannels, 0, 0, startupInfo.maxPacketSize);
                     ClientStarted = true;
                 }
-                catch (System.Exception e)
+                catch (Exception e)
                 {
-                    Debug.LogError($"EPIC FAILURE: {e.ToString()}");
+                    Debug.LogError("Ignorance encountered a fatal exception. I'm sorry, but I gotta bail - if you believe you found a bug, please report it on the GitHub.\n" +
+                        $"The exception returned was: {e.ToString()}");
                     return;
                 }
 
                 // Attempt to start connection...
-                cAddress.SetHost(hostAddress);
-                cAddress.Port = port;
-                Peer cPeer = cHost.Connect(cAddress, channelCount);
+                cAddress.SetHost(startupInfo.hostAddress);
+                cAddress.Port = startupInfo.port;
+                Peer cPeer = cHost.Connect(cAddress, startupInfo.maxChannels);
 
                 while (!clientShouldCeaseOperation)
                 {
@@ -430,7 +381,7 @@ namespace Mirror
                     {
                         if (cHost.CheckEvents(out Event networkEvent) <= 0)
                         {
-                            if (cHost.Service(serviceTimeout, out networkEvent) <= 0) break;
+                            if (cHost.Service(startupInfo.threadPumpTimeout, out networkEvent) <= 0) break;
                             clientWasPolled = true;
                         }
 
@@ -484,7 +435,7 @@ namespace Mirror
                         }
 
                         int returnCode = cPeer.SendAndReturnStatusCode(opkt.channelId, ref opkt.payload);
-                        if (returnCode != 0) print($"Could not send {opkt.payload.Length} bytes to server on channel {opkt.channelId}, error code {returnCode}");
+                        if (returnCode != 0) print($"Ignorance: Could not send {opkt.payload.Length} bytes to server on channel {opkt.channelId}, error code {returnCode}");
                     }
                 }
 
@@ -493,66 +444,65 @@ namespace Mirror
                 ClientStarted = false;
             }
         }
-        #endregion
+#endregion
 
-        #region Server Threading
+#region Server Threading
         // Server thread.
         private Thread IgnoranceServerThread()
         {
             string bindAddress = string.Empty;
-            /* if (ServerBindAll)
-            {
-                if (SystemInfo.operatingSystemFamily == OperatingSystemFamily.MacOSX) bindAddress = "::0";
-                else bindAddress = "0.0.0.0";
-            }
-            */
 
-            Thread t = new Thread(() => ServerWorker(bindAddress, (ushort)CommunicationPort, Channels.Length, MaximumPeerCCU, MaxPacketSizeInKb * 1024, EnetPollTimeout));
+            ThreadBootstrapStruct startupInformation = new ThreadBootstrapStruct()
+            {
+                hostAddress = bindAddress,
+                port = (ushort)CommunicationPort,
+                maxPacketSize = MaxPacketSizeInKb * 1024,
+                maxPeers = MaximumPeerCCU,
+                maxChannels = Channels.Length,
+                threadPumpTimeout = EnetPollTimeout
+            };
+
+            Thread t = new Thread(() => ServerWorkerThread(startupInformation));
             return t;
         }
 
-        // Thread Wrapper.
-        private static void ServerWorker(string bindAddress, ushort port, int channels = 255, int maxPeers = 4095, int maxPacketSize = 16384, int serviceTimeout = 1)
+        private static void ServerWorkerThread(ThreadBootstrapStruct startupInformation)
         {
-            // Setup queues.
-            MirrorIncomingQueue = new ConcurrentQueue<IncomingPacket>();
-            MirrorOutgoingQueue = new ConcurrentQueue<OutgoingPacket>();
-
-            // Setup our own packet buffer.
-            byte[] workerPacketBuffer = new byte[maxPacketSize];
-
+            // Worker buffer.
+            byte[] workerPacketBuffer = new byte[startupInformation.maxPacketSize];
             // Connection ID.
             int nextConnectionId = 1;
-
             // Server address properties
             Address eAddress = new Address()
             {
-                Port = port,
+                Port = startupInformation.port,
             };
 
-            if (!string.IsNullOrEmpty(bindAddress)) eAddress.SetHost(bindAddress);
+            // Bind on everything or not?
+            if (!string.IsNullOrEmpty(startupInformation.hostAddress)) eAddress.SetHost(startupInformation.hostAddress);
 
             using (Host serverWorkerHost = new Host())
             {
                 try
                 {
-                    serverWorkerHost.Create(eAddress, maxPeers, channels, 0, 0, maxPacketSize);
+                    serverWorkerHost.Create(eAddress, startupInformation.maxPeers, startupInformation.maxChannels, 0, 0, startupInformation.maxPacketSize);
                     ServerStarted = true;
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"EPIC FAILURE: {e.ToString()}");
-                    Debug.LogError("Server worker thread is dying now.");
+                    Debug.LogError("Ignorance encountered a fatal exception. I'm sorry, but I gotta bail - if you believe you found a bug, please report it on the GitHub.\n" +
+                        $"The exception returned was: {e.ToString()}");
                     return;
                 }
 
-                Debug.Log($"Server worker listening on UDP port {port}. Capacity: {maxPeers} peers. Channels: {channels}. Buffer size: {maxPacketSize} bytes");
+                Debug.Log($"Ignorance Server worker thread is ready for connections! I'm listening on UDP port {startupInformation.port}.\n" +
+                    $"Capacity: {startupInformation.maxPeers} peers with {startupInformation.maxChannels} channels. My buffer size is {startupInformation.maxPacketSize} bytes");
 
                 // The meat and potatoes.
                 while (!serverShouldCeaseOperation)
                 {
                     // Outgoing stuff
-                    while (MirrorOutgoingQueue.TryDequeue(out OutgoingPacket opkt))
+                    while (MirrorServerOutgoingQueue.TryDequeue(out OutgoingPacket opkt))
                     {
                         switch (opkt.commandType)
                         {
@@ -584,7 +534,7 @@ namespace Mirror
                     {
                         if (serverWorkerHost.CheckEvents(out Event netEvent) <= 0)
                         {
-                            if (serverWorkerHost.Service(serviceTimeout, out netEvent) <= 0)
+                            if (serverWorkerHost.Service(startupInformation.threadPumpTimeout, out netEvent) <= 0)
                                 break;
 
                             hasBeenPolled = true;
@@ -596,7 +546,6 @@ namespace Mirror
                                 break;
 
                             case EventType.Connect:
-                                // print($"CONNECT EVENT!");
                                 int connectionId = nextConnectionId;
                                 nextConnectionId += 1;
 
@@ -610,12 +559,11 @@ namespace Mirror
                                 newConnectionPkt.type = MirrorPacketType.ServerClientConnected;
                                 newConnectionPkt.ipAddress = netEvent.Peer.IP;
 
-                                MirrorIncomingQueue.Enqueue(newConnectionPkt);
+                                MirrorServerIncomingQueue.Enqueue(newConnectionPkt);
                                 break;
 
                             case EventType.Disconnect:
                             case EventType.Timeout:
-                                // print($"DISCONNECT EVENT!");
                                 if (PeersToConnectionIDs.TryGetValue(netEvent.Peer, out int deadPeer))
                                 {
                                     IncomingPacket disconnectionPkt = default;
@@ -623,7 +571,7 @@ namespace Mirror
                                     disconnectionPkt.type = MirrorPacketType.ServerClientDisconnected;
                                     disconnectionPkt.ipAddress = netEvent.Peer.IP;
 
-                                    MirrorIncomingQueue.Enqueue(disconnectionPkt);
+                                    MirrorServerIncomingQueue.Enqueue(disconnectionPkt);
                                     ConnectionIDToPeers.TryRemove(deadPeer, out Peer _);
                                 }
 
@@ -635,9 +583,9 @@ namespace Mirror
 
                                 if (PeersToConnectionIDs.TryGetValue(netEvent.Peer, out dataConnID))
                                 {
-                                    if (netEvent.Packet.Length > maxPacketSize)
+                                    if (netEvent.Packet.Length > startupInformation.maxPacketSize)
                                     {
-                                        Debug.LogWarning($"WARNING: Packet too large for buffer; dropping. Packet {netEvent.Packet.Length} bytes; limit is {maxPacketSize} bytes.");
+                                        Debug.LogWarning($"Ignorance WARNING: Packet too large for buffer; dropping. Packet {netEvent.Packet.Length} bytes; limit is {startupInformation.maxPacketSize} bytes.");
                                         netEvent.Packet.Dispose();
                                         return;
                                     }
@@ -645,7 +593,6 @@ namespace Mirror
                                     // Copy to the packet cache.
                                     netEvent.Packet.CopyTo(workerPacketBuffer);
                                     int spLength = netEvent.Packet.Length;
-                                    // print($"spLength {spLength}");
 
                                     IncomingPacket dataPkt = default;
                                     dataPkt.connectionId = dataConnID;
@@ -659,7 +606,7 @@ namespace Mirror
                                     // dataPkt.data = new ArraySegment<byte>(workerPacketBuffer, 0, spLength);
                                     dataPkt.ipAddress = netEvent.Peer.IP;
 
-                                    MirrorIncomingQueue.Enqueue(dataPkt);
+                                    MirrorServerIncomingQueue.Enqueue(dataPkt);
                                 }
                                 else
                                 {
@@ -675,16 +622,16 @@ namespace Mirror
 
                 // Disconnect everyone, we're done here.
                 print($"Kicking all connected Peers...");
-                foreach (System.Collections.Generic.KeyValuePair<int, Peer> kv in ConnectionIDToPeers) kv.Value.DisconnectNow(0);
+                foreach (KeyValuePair<int, Peer> kv in ConnectionIDToPeers) kv.Value.DisconnectNow(0);
 
                 print("Flushing...");
                 serverWorkerHost.Flush();
                 ServerStarted = false;
             }
         }
-        #endregion
+#endregion
 
-        #region Unity Editor and Sanity Checks
+#region Unity Editor and Sanity Checks
         // Sanity checks.
         private void OnValidate()
         {
@@ -703,8 +650,6 @@ namespace Mirror
                 };
             }
         }
-
-#if MIRROR_4_0_OR_NEWER
         public override bool ServerSend(List<int> connectionIds, int channelId, ArraySegment<byte> segment)
         {
             if (!ServerStarted)
@@ -719,30 +664,74 @@ namespace Mirror
                 return false;
             }
 
-            foreach(int conn in connectionIds) {
+            foreach (int conn in connectionIds)
+            {
                 // Another sneaky hack
-                ServerSend(conn, channelId, segment);
-                /*
-                    OutgoingPacket op = default;
-                    op.connectionId = conn;
-                    op.channelId = (byte)channelId;
-
-                    Packet dataPayload = default;
-                    dataPayload.Create(segment.Array, segment.Offset, segment.Count + segment.Offset, (PacketFlags)Channels[channelId]);
-                    op.payload = dataPayload;
-
-                    MirrorOutgoingQueue.Enqueue(op);
-                */
+                ENETServerQueueInternal(conn, channelId, segment);
             }
 
-            return true;          
+            return true;
         }
-#endif
 
-        #endregion
+        /// <summary>
+        /// Enqueues a packet for ENET worker to pick up and dispatch.
+        /// Hopefully should make it easier to fix things.
+        /// </summary>
+        /// <param name="channelId">The channel id you wish to send the packet on. Must be within 0 and the count of the channels array.</param>
+        /// <param name="dataPayload">The array segment containing the data to send to ENET.</param>
+        /// <returns></returns>
+        private bool ENETClientQueueInternal(int channelId, ArraySegment<byte> dataPayload)
+        {
+            if (channelId > Channels.Length)
+            {
+                Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
+                return false;
+            }
 
-        #region Structs, classes, etc
-        // Structs to make life easier.
+            OutgoingPacket opkt = default;
+            opkt.channelId = (byte)channelId;
+
+            Packet payload = default;
+            payload.Create(dataPayload.Array, dataPayload.Offset, dataPayload.Count + dataPayload.Offset, (PacketFlags)Channels[channelId]);
+
+            opkt.payload = payload;
+
+            // Enqueue it.
+            MirrorClientOutgoingQueue.Enqueue(opkt);
+
+            return true;
+        }
+
+        private bool ENETServerQueueInternal(int connectionId, int channelId, ArraySegment<byte> data)
+        {
+            if (!ServerStarted)
+            {
+                Debug.LogError("Attempted to send while the server was not active");
+                return false;
+            }
+
+            if (channelId > Channels.Length)
+            {
+                Debug.LogWarning($"Ignorance: Attempted to send data on channel {channelId} when we only have {Channels.Length} channels defined");
+                return false;
+            }
+
+            OutgoingPacket op = default;
+            op.connectionId = connectionId;
+            op.channelId = (byte)channelId;
+
+            Packet dataPayload = default;
+            dataPayload.Create(data.Array, data.Offset, data.Count + data.Offset, (PacketFlags)Channels[channelId]);
+
+            op.payload = dataPayload;
+
+            MirrorServerOutgoingQueue.Enqueue(op);
+            return true;
+        }
+#endregion
+
+#region Structs, classes, etc
+        // Incoming packet struct.
         private struct IncomingPacket
         {
             public int connectionId;
@@ -751,7 +740,7 @@ namespace Mirror
             public byte[] data;
             public string ipAddress;
         }
-
+        // Outgoing packet struct
         private struct OutgoingPacket
         {
             public int connectionId;
@@ -760,8 +749,7 @@ namespace Mirror
             public CommandPacketType commandType;
         }
 
-        // -> Moved ChannelTypes enum to it's own file, so it's easier to maintain.
-
+        // Packet Type Struct. Not to be confused with the ENET Packet Type.
         [Serializable]
         public enum MirrorPacketType
         {
@@ -773,6 +761,7 @@ namespace Mirror
             ClientGotData
         }
 
+        // Command Packet Type Struct.
         public enum CommandPacketType
         {
             Nothing,
@@ -780,6 +769,19 @@ namespace Mirror
             ClientDisconnectRequest
         }
 
+        // -> Moved ChannelTypes enum to it's own file, so it's easier to maintain.
+
+        public struct ThreadBootstrapStruct
+        {
+            public string hostAddress;
+            public ushort port;
+
+            public int threadPumpTimeout;
+
+            public int maxPacketSize;
+            public int maxChannels;
+            public int maxPeers;
+        }
 #endregion
     }
 
