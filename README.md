@@ -16,7 +16,7 @@ This repo runs nightly and formats Ignorance releases for UPM.  The Ignorance re
     ```
     - Example:
       ```
-      https://github.com/TCROC/Ignorance-UPM.git#19.1.2
+      https://github.com/TCROC/Ignorance-UPM.git#1.3.8
       ```
 # Reporting Issues
 
