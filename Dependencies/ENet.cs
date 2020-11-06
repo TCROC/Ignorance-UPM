@@ -79,6 +79,18 @@ namespace ENet {
 		public IntPtr packet;
 	}
 
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct ENetCallbacks {
+		public AllocCallback malloc;
+		public FreeCallback free;
+		public NoMemoryCallback noMemory;
+	}
+
+	public delegate IntPtr AllocCallback(IntPtr size);
+	public delegate void FreeCallback(IntPtr memory);
+	public delegate void NoMemoryCallback();
+	public delegate void PacketFreeCallback(Packet packet);
+
 	internal static class ArrayPool {
 		[ThreadStatic]
 		private static byte[] byteBuffer;
@@ -208,6 +220,26 @@ namespace ENet {
 		}
 	}
 
+	public class Callbacks {
+		private ENetCallbacks nativeCallbacks;
+
+		internal ENetCallbacks NativeData {
+			get {
+				return nativeCallbacks;
+			}
+
+			set {
+				nativeCallbacks = value;
+			}
+		}
+
+		public Callbacks(AllocCallback allocCallback, FreeCallback freeCallback, NoMemoryCallback noMemoryCallback) {
+			nativeCallbacks.malloc = allocCallback;
+			nativeCallbacks.free = freeCallback;
+			nativeCallbacks.noMemory = noMemoryCallback;
+		}
+	}
+
 	public struct Packet : IDisposable {
 		private IntPtr nativePacket;
 
@@ -281,6 +313,18 @@ namespace ENet {
 				throw new InvalidOperationException("Packet not created");
 		}
 
+		public void SetFreeCallback(IntPtr callback) {
+			IsCreated();
+
+			Native.enet_packet_set_free_callback(nativePacket, callback);
+		}
+
+		public void SetFreeCallback(PacketFreeCallback callback) {
+			IsCreated();
+
+			Native.enet_packet_set_free_callback(nativePacket, Marshal.GetFunctionPointerForDelegate(callback));
+		}
+
 		public void Create(byte[] data) {
 			if (data == null)
 				throw new ArgumentNullException("data");
@@ -336,7 +380,7 @@ namespace ENet {
 			nativePacket = Native.enet_packet_create_offset(data, (IntPtr)length, (IntPtr)offset, flags);
 		}
 
-		public void CopyTo(byte[] destination) {
+		public void CopyTo(byte[] destination, int startPos = 0) {
             if (destination == null)
                 throw new ArgumentNullException("destination");
             
@@ -347,7 +391,7 @@ namespace ENet {
                 return;
             }
 			
-            Marshal.Copy(Data, destination, 0, Length);
+            Marshal.Copy(Data, destination, startPos, Length);
 		}
 	}
 
@@ -877,23 +921,27 @@ namespace ENet {
 		public const uint version = (2 << 16) | (4 << 8) | (0);
 
 		public static bool Initialize() {
+			if (Native.enet_linked_version() != version)
+				throw new InvalidOperationException("You're trying to use an incompatible version of Enet with this Managed Library.");
+
 			return Native.enet_initialize() == 0;
+		}
+
+		public static bool Initialize(Callbacks callbacks) {
+			if(callbacks == null) 
+				throw new ArgumentNullException("callbacks");
+			
+			if (Native.enet_linked_version() != version)
+				throw new InvalidOperationException("You're trying to use an incompatible version of Enet with this Managed Library.");
+
+			
+			ENetCallbacks nativeCallbacks = callbacks.NativeData;
+
+			return Native.enet_initialize_with_callbacks(version, ref nativeCallbacks) == 0;
 		}
 
 		public static void Deinitialize() {
 			Native.enet_deinitialize();
-		}
-
-		// Supports for mimalloc memory allocator.
-		public static IntPtr Malloc(int size) => Malloc((ulong)size);
-		public static IntPtr Malloc(ulong size)
-		{
-			return Native.enet_mem_acquire(size);
-		}
-
-		public static void Free(IntPtr alloc)
-		{
-			Native.enet_mem_release(alloc);
 		}
 
 		public static uint Time {
@@ -905,29 +953,45 @@ namespace ENet {
 
 	[SuppressUnmanagedCodeSecurity]
 	internal static class Native {
-#if __IOS__ || UNITY_IOS && !UNITY_EDITOR
+		// This should address Unity usage and bug #66: Platform specific Enet / libenet
+		// https://github.com/SoftwareGuy/Ignorance/issues/66
+#if UNITY_EDITOR
+        // We are inside the Unity Editor.
+#if UNITY_EDITOR_OSX
+		// Unity Editor on macOS needs to use libenet.
+		private const string nativeLibrary = "libenet";
+#else
+        // TODO: Check if Linux requires 'libenet' too. (Apparently not?)
+        private const string nativeLibrary = "enet";
+#endif
+#endif
+
+#if !UNITY_EDITOR
+		// We're not inside the Unity Editor.
+#if __APPLE__ && !(__IOS__ || UNITY_IOS)
+		// Use libenet on macOS.
+		private const string nativeLibrary = "libenet";
+#elif __IOS__ || UNITY_IOS
         // We're building for a certain mobile fruity OS.
 		private const string nativeLibrary = "__Internal";
-#elif __APPLE__ || UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
-        // We're building for a certain fruity OS.
-        private const string nativeLibrary = "libenet";
 #else
-        // Assume everything else, Windows et al...		
+        // Assume everything else, Windows et al... TODO: Linux check		
         private const string nativeLibrary = "enet";
+#endif
 #endif
 
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
 		internal static extern int enet_initialize();
 
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
-		internal static extern IntPtr enet_mem_acquire(ulong sz);
-
-		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
-		internal static extern void enet_mem_release(IntPtr alloc);
+		internal static extern int enet_initialize_with_callbacks(uint version, ref ENetCallbacks inits);
 
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
 		internal static extern void enet_deinitialize();
 
+		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+		internal static extern uint enet_linked_version();
+		
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
 		internal static extern uint enet_time_get();
 
@@ -969,6 +1033,9 @@ namespace ENet {
 
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
 		internal static extern int enet_packet_get_length(IntPtr packet);
+
+		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
+		internal static extern void enet_packet_set_free_callback(IntPtr packet, IntPtr callback);
 
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
 		internal static extern void enet_packet_dispose(IntPtr packet);
@@ -1101,5 +1168,10 @@ namespace ENet {
 
 		[DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
 		internal static extern void enet_peer_reset(IntPtr peer);
+		
+        // Ignorance-specific Debugging
+#if UNITY_EDITOR
+        public static string nativeLibraryName { get { return nativeLibrary; } }
+#endif		
 	}
 }
