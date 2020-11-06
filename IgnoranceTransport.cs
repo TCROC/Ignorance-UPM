@@ -10,8 +10,6 @@
 // at https://github.com/SoftwareGuy/Ignorance. Remember, OSS is the
 // way of the future!
 // ----------------------------------------
-#define IGNORANCE_PRESENT
-
 using ENet;
 #if UNITY_EDITOR
 using Mirror.Ignorance.Editor;
@@ -371,6 +369,16 @@ namespace Mirror
             m_Server = null;
 
             Log("Ignorance Transport: Server stopped.");
+        }
+
+        /// <summary>
+        /// Get a peer from their associated connection ID
+        /// </summary>
+        /// <param name="connectionID">The id of the Peer's connection</param>
+        /// <returns>The Peer</returns>
+        public Peer GetPeerByConnection(int connectionID)
+        {
+            return knownConnIDToPeers[connectionID];
         }
 
         #endregion
@@ -1235,7 +1243,7 @@ namespace Mirror
 
         public class TransportInfo
         {
-            public const string Version = "1.2.1 In-Development";
+            public const string Version = "1.2.1 Patch Release 2";
         }
         #endregion
 
