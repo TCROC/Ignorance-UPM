@@ -1,8 +1,7 @@
 /*
  *  Managed C# wrapper for an extended version of ENet
- *  Copyright (c) 2013 James Bellinger
- *  Copyright (c) 2016 Nate Shoffner
- *  Copyright (c) 2018 Stanislav Denisov
+ *  Copyright (c) 2019 Matt Coburn (SoftwareGuy/Coburn64), Chris Burns (c6burns)
+ *  Copyright (c) 2013 - 2018 James Bellinger, Nate Shoffner, Stanislav Denisov
  *
  *  Permission is hereby granted, free of charge, to any person obtaining a copy
  *  of this software and associated documentation files (the "Software"), to deal
@@ -37,7 +36,8 @@ namespace ENet
         Reliable = 1 << 0,
         Unsequenced = 1 << 1,
         NoAllocate = 1 << 2,
-        UnreliableFragmented = 1 << 3
+        UnreliableFragmented = 1 << 3,
+        Instant = 1 << 4
     }
 
     public enum EventType
@@ -65,7 +65,7 @@ namespace ENet
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct ENetAddress
+    internal struct ENetAddress
     {
         [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
         public byte[] ip;
@@ -73,7 +73,7 @@ namespace ENet
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct ENetEvent
+    internal struct ENetEvent
     {
         public EventType type;
         public IntPtr peer;
@@ -83,7 +83,7 @@ namespace ENet
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct ENetCallbacks
+    internal struct ENetCallbacks
     {
         public AllocCallback malloc;
         public FreeCallback free;
@@ -136,7 +136,7 @@ namespace ENet
             }
         }
 
-        public Address(ENetAddress address)
+        internal Address(ENetAddress address)
         {
             nativeAddress = address;
         }
@@ -208,7 +208,7 @@ namespace ENet
             }
         }
 
-        public Event(ENetEvent @event)
+        internal Event(ENetEvent @event)
         {
             nativeEvent = @event;
         }
@@ -296,7 +296,7 @@ namespace ENet
             }
         }
 
-        public Packet(IntPtr packet)
+        internal Packet(IntPtr packet)
         {
             nativePacket = packet;
         }
@@ -593,7 +593,7 @@ namespace ENet
 
             if (address != null)
             {
-                var nativeAddress = address.Value.NativeData;
+                ENetAddress nativeAddress = address.Value.NativeData;
 
                 nativeHost = Native.enet_host_create(ref nativeAddress, (IntPtr)peerLimit, (IntPtr)channelLimit, incomingBandwidth, outgoingBandwidth, bufferSize);
             }
@@ -634,7 +634,7 @@ namespace ENet
             CheckCreated();
 
             packet.CheckCreated();
-            Native.enet_host_broadcast_excluding(nativeHost, channelID, packet.NativeData, excludedPeer.NativeData);
+            Native.enet_host_broadcast_exclude(nativeHost, channelID, packet.NativeData, excludedPeer.NativeData);
             packet.NativeData = IntPtr.Zero;
         }
 
@@ -668,13 +668,12 @@ namespace ENet
         {
             CheckCreated();
 
-            ENetEvent nativeEvent;
 
-            var result = Native.enet_host_check_events(nativeHost, out nativeEvent);
+            int result = Native.enet_host_check_events(nativeHost, out ENetEvent nativeEvent);
 
             if (result <= 0)
             {
-                @event = default(Event);
+                @event = default;
 
                 return result;
             }
@@ -699,8 +698,8 @@ namespace ENet
             CheckCreated();
             CheckChannelLimit(channelLimit);
 
-            var nativeAddress = address.NativeData;
-            var peer = new Peer(Native.enet_host_connect(nativeHost, ref nativeAddress, (IntPtr)channelLimit, data));
+            ENetAddress nativeAddress = address.NativeData;
+            Peer peer = new Peer(Native.enet_host_connect(nativeHost, ref nativeAddress, (IntPtr)channelLimit, data));
 
             if (peer.NativeData == IntPtr.Zero)
                 throw new InvalidOperationException("Host connect call failed");
@@ -715,13 +714,12 @@ namespace ENet
 
             CheckCreated();
 
-            ENetEvent nativeEvent;
 
-            var result = Native.enet_host_service(nativeHost, out nativeEvent, (uint)timeout);
+            int result = Native.enet_host_service(nativeHost, out ENetEvent nativeEvent, (uint)timeout);
 
             if (result <= 0)
             {
-                @event = default(Event);
+                @event = default;
 
                 return result;
             }
@@ -757,7 +755,7 @@ namespace ENet
     public struct Peer
     {
         private IntPtr nativePeer;
-        private uint nativeID;
+        private readonly uint nativeID;
 
         internal IntPtr NativeData
         {
@@ -772,7 +770,7 @@ namespace ENet
             }
         }
 
-        public Peer(IntPtr peer)
+        internal Peer(IntPtr peer)
         {
             nativePeer = peer;
             nativeID = nativePeer != IntPtr.Zero ? Native.enet_peer_get_id(nativePeer) : 0;
@@ -946,6 +944,19 @@ namespace ENet
             return Native.enet_peer_send(nativePeer, channelID, packet.NativeData) == 0;
         }
 
+        // Added by Coburn. This version returns either 0 if the send was successful,
+        // or the ENET return code if not. Sometimes a bool is not enough to determine
+        // the root cause of the issue.
+        public int SendAndReturnStatusCode(byte channelID, ref Packet packet)
+        {
+            CheckCreated();
+
+            packet.CheckCreated();
+
+            return Native.enet_peer_send(nativePeer, channelID, packet.NativeData);
+        }
+
+
         public bool Receive(out byte channelID, out Packet packet)
         {
             CheckCreated();
@@ -959,7 +970,7 @@ namespace ENet
                 return true;
             }
 
-            packet = default(Packet);
+            packet = default;
 
             return false;
         }
@@ -1041,7 +1052,7 @@ namespace ENet
         public const uint timeoutLimit = 32;
         public const uint timeoutMinimum = 5000;
         public const uint timeoutMaximum = 30000;
-        public const uint version = (2 << 16) | (2 << 8) | (8);
+        public const uint version = (2 << 16) | (3 << 8) | (0);
 
         public static bool Initialize()
         {
@@ -1071,8 +1082,15 @@ namespace ENet
     internal static class Native
     {
 #if __IOS__ || UNITY_IOS && !UNITY_EDITOR
-			private const string nativeLibrary = "__Internal";
+        // iOS
+		private const string nativeLibrary = "__Internal";
+#elif __APPLE__ || UNITY_STANDALONE_OSX && !UNITY_EDITOR
+        // MacOS
+        // Custom ENet Repo builds as libenet.bundle; make sure it's the same.
+        private const string nativeLibrary = "libenet";
 #else
+        // Assume everything else, Windows et al...
+        // This might be interesting if someone's building for Nintendo Switch or whatnot...
         private const string nativeLibrary = "enet";
 #endif
 
@@ -1140,7 +1158,7 @@ namespace ENet
         internal static extern void enet_host_broadcast(IntPtr host, byte channelID, IntPtr packet);
 
         [DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void enet_host_broadcast_excluding(IntPtr host, byte channelID, IntPtr packet, IntPtr excludedPeer);
+        internal static extern void enet_host_broadcast_exclude(IntPtr host, byte channelID, IntPtr packet, IntPtr excludedPeer);
 
         [DllImport(nativeLibrary, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void enet_host_broadcast_selective(IntPtr host, byte channelID, IntPtr packet, IntPtr[] peers, IntPtr peersLength);
