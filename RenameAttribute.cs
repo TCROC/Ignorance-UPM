@@ -1,10 +1,10 @@
-// Contributed code by Petris.
+﻿// Contributed code by Petris.
 // https://github.com/MichalPetryka/LiteNetLib4Mirror
 #if UNITY_EDITOR
 using UnityEditor;
 using UnityEngine;
 
-namespace Mirror.IgnoranceEditor
+namespace Mirror.Ignorance.Editor
 {
     public class RenameAttribute : PropertyAttribute
     {

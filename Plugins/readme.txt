@@ -1,35 +1,29 @@
-ENET Pre-compiled Binary Library Blobs
+ENET Redist Binary C Blobs
 ==========================
-This folder contains pre-compiled binaries for a variety of different platforms.
+This folder (Redist) contains a set of compiled binary blobs.
+Contained within these folders lies the following:
 
-A brief summary of these folders are as follows:
+* iOS
+- Universal for iOS 8.x+
 
-- Windows, Mac, Linux
--- 64bit (x64)
+* Android
+- arm64-v8a: AArch64/ARM64 ENET binary.
+- armeabi-v7a: ARMv7 ENET binary.
+- x86: 32Bit x86 Android ENET Binary.
+- NOTE: Minimum of Android KitKat 4.4 OS required.
 
-- Android (Kitkat 4.4 minimum target OS)
--- ARMv7 (armeabi-v7a), ARMv8/AArch64 (arm64-v8a)
+* Windows
+- enet.dll: Win64 (x86_64 Windows) ENET Binary. Cross compiled using MinGW on Ubuntu.
+- NOTE: Unfortunately x86 (32-Bit) targets are not supported. So, ensure you build a 64-Bit player or you will get a TypeLoadException.
 
-- iOS 
--- FAT Library (armv7 + arm64). Targeted for iOS 8 minimum. Unsigned library.
+* MacOS
+- enet.bundle: MacOS compiled ENET Binary using Apple CLang from XCode. (CMake & Make)
 
-DEBUG VERSIONS
-===============
-Debug versions of the libraries can be obtained at https://github.com/SoftwareGuy/ENet-CSharp/releases.
-Otherwise you can also compile the library yourself with Debug enabled.
-
-DOT POINTS
-===========
-1. 32bit Support for Ignorance has been removed. Originally, I did not want to support 32bit operating systems,
-however due to some countries in the world still stuck in the 32bit era (Brasil, some Russian areas, etc) I added them as a
-goodwill gesture. However, since those who needed the libraries have now vanished, I have stopped building 32bit versions of ENet.
-
-COMPILE THE CODE YOURSELF
-=========================
-If you don't trust the above binaries then git clone the ENET-CSharp repository (http://github.com/SoftwareGuy/ENet-CSharp) and read the readme.
+* Linux
+- libenet.so: Ubuntu 18.04 compiled ENET Shared Binary.
 
 EXCLUSION INSTRUCTIONS
 ======================
 No need, the meta data will cover that for you.
 
-Still don't know what to do with these? Drop by the Mirror discord and post in the Ignorance channel.
+Still don't know what to do with these? Drop by the Mirror discord and post in the #ignorance channel.
