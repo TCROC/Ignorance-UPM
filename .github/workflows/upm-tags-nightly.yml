@@ -84,6 +84,7 @@ jobs:
             continue
           fi
           tagToVersion="${theirTag#$PREFIX_TO_REMOVE}"
+          tagToVersion=$(sed 's/\./-/3g' <<<$tagToVersion) # it needs to be SemVar compatible, so replace any occurances of the "." character after 3 occurances.
           if [[ "$myTags" == *"$tagToVersion"* ]]; then
             echo "Already released tag: $tagToVersion. Skipping"
             continue
