@@ -18,6 +18,10 @@ This repo runs nightly and formats Ignorance releases for UPM.  The Ignorance re
       ```
       https://github.com/TCROC/Ignorance-UPM.git#1.3.8
       ```
+# Version Differences
+
+The tags at the main repo here: https://github.com/SoftwareGuy/Ignorance are not always compatible with UPM.  For example, the version v1.3.9.2 is not compatible with UPM and is converted to 1.3.9-2.  They are equivalent to each other.
+
 # Reporting Issues
 
 If you find any issues please open up an issue so it can be fixed :)
