@@ -1,4 +1,4 @@
-﻿// ----------------------------------------
+// ----------------------------------------
 // Ignorance by Matt Coburn, 2018 - 2019
 // This Transport uses other dependencies that you can
 // find references to in the README.md of this package.
@@ -137,6 +137,9 @@ namespace Mirror
 #endif
         public int m_ServerUPNPRuleLifetime = 600;   // 1 hour?
 
+        public bool m_CustomPacketBufferSize = false;
+        public int m_PacketBufferSizeInKB = 64;
+
         private bool m_HasAlreadyConfiguredNat = false;
         private NatDiscoverer m_NATDiscoverer = null;
         private NatDevice m_NATDevice = null;
@@ -153,6 +156,9 @@ namespace Mirror
         private Peer m_ClientPeer = new Peer();
 
         private string m_MyServerAddress = string.Empty;
+
+        // Managed cache for incoming packets, size is max theoretical size for UDP packets
+        private byte[] packetCache = new byte[65535];
 
         /// <summary>
         /// Known connections dictonary since ENET is a little weird.
@@ -188,21 +194,21 @@ namespace Mirror
         private void Awake()
         {
             GreetEveryone();
+
 #if UNITY_EDITOR_OSX
             Debug.LogWarning("Hmm, looks like you're using Ignorance inside a Mac Editor instance. This is known to be problematic due to some Unity Mono bugs. " +
                 "If you have issues using Ignorance, please try the Unity 2019.1 beta and let the developer know. Thanks!");
 #endif
-            Library.Initialize();
-
             // If the user sets this to -1, treat it as no limit.
             if (m_MaximumTotalConnections < 0) m_MaximumTotalConnections = 0;
-        }
 
-        public void OnDestroy()
-        {
-            Library.Deinitialize();
+            // 1.2.7: If we're using a custom packet buffer size, initialize it.
+            if (m_CustomPacketBufferSize)
+            {
+                packetCache = new byte[m_PacketBufferSizeInKB * 1024];
+                Log($"Ignorance: Initialized packet cache. Capacity: {packetCache.Length} byte.");
+            }
         }
-
         #endregion
 
         #region Transport - Server Functions
@@ -260,6 +266,19 @@ namespace Mirror
         /// <param name="maxConnections">How many connections can we have?</param>
         public void ServerStart(string networkAddress, ushort port, int maxConnections)
         {
+            // 1.2.5
+            if (!AlreadyInitialized)
+            {
+                if (!InitializeENET()) {
+                    LogError("Ignorance FATAL ERROR: ENET-senpai won't initialize. Did someone put a bad native library in place of the one that should have shipped with this Transport?");
+                    return;
+                } else {
+                    Log("Ignorance: ENET Initialized");
+                    AlreadyInitialized = true;
+                }
+            }
+            
+
             // Do not attempt to start more than one server.
             // Check if the server is active before attempting to create. If it returns true,
             // then we should not continue, and we'll emit a refusal error message.
@@ -339,9 +358,10 @@ namespace Mirror
             // Finally create the server.
             m_Server.Create(m_ServerAddress, m_MaximumTotalConnections, m_ChannelDefinitions.Count);
 
+            // WILL BE REMOVED IN 1.2.8
             if (m_UseLZ4Compression)
             {
-                Log("Ignorance: Server instance will use LZ4 Compression.");
+                Log("Ignorance: Server instance will use LZ4 Compression. If you get random client disconnections, PLEASE FILE A BUG WITH A REPO PROJECT!");
                 m_Server.EnableCompression();
             }
 
@@ -490,6 +510,21 @@ namespace Mirror
         /// <param name="port">The connection port.</param>
         public override void ClientConnect(string address)
         {
+            // 1.2.5
+            if (!AlreadyInitialized)
+            {
+                if (!InitializeENET())
+                {
+                    Debug.LogError("Ignorance FATAL ERROR: ENET-senpai won't initialize. Did someone put a bad native library in place of the one that should have shipped with this Transport?");
+                    return;
+                }
+                else
+                {
+                    Debug.Log("Ignorance: ENET Initialized");
+                    AlreadyInitialized = true;
+                }
+            }
+
             // Make sure we're not trying to overflow the channel counts.
             if ((m_ChannelDefinitions.Count - 1) >= 255)
             {
@@ -499,9 +534,16 @@ namespace Mirror
 
             Log($"Ignorance: Acknowledging connection request to {address}:{m_Port}");
 
+            // TODO: Recycle clients?
             if (m_Client == null) m_Client = new Host();
             if (!m_Client.IsSet) m_Client.Create(null, 1, m_ChannelDefinitions.Count);
-            if (m_UseLZ4Compression) m_Client.EnableCompression();
+
+            // WILL BE REMOVED IN 1.2.8
+            if (m_UseLZ4Compression)
+            {
+                Log("Ignorance: Client will use LZ4 Compression. If you get random disconnections, PLEASE FILE A BUG WITH A REPO PROJECT!");
+                m_Client.EnableCompression();
+            }
 
             Address clientAddress = new Address();
 
@@ -553,20 +595,13 @@ namespace Mirror
                 Log($"Ignorance: Client peer state before disconnect request fires: {m_ClientPeer.State}");
             }
 
-            if (m_ClientPeer.State == PeerState.Disconnected)
-            {
-                // The client peer is already disconnected. Don't be dumb.
-                return;
-            }
-
             Log("Ignorance: Received disconnection request from Mirror. Acknowledged!");
 
             // Disconnect the client's peer object, only if it's not disconnected. This might fix a bad pointer or something.
             // Reference: https://github.com/SoftwareGuy/Ignorance/issues/20
             if (m_ClientPeer.IsSet)
             {
-                if (m_TransportVerbosity > TransportVerbosity.Chatty) Log("Ignorance: Disconnecting the client's peer...");
-                if (m_ClientPeer.State != PeerState.Disconnected) m_ClientPeer.DisconnectNow(0);
+                m_ClientPeer.DisconnectNow(0);
             }
 
             if (IsValid(m_Client))
@@ -576,6 +611,7 @@ namespace Mirror
                 m_Client.Dispose();
             }
 
+            // TODO: Don't null this, recycle the client?
             m_Client = null;
         }
         #endregion
@@ -594,6 +630,14 @@ namespace Mirror
 
         public bool ClientSend(int channelId, ArraySegment<byte> data)
         {
+            // 1.2.7: Never send any data if we're not initialized
+            if(!AlreadyInitialized)
+            {
+                // 1.2.7.1: Shush, you!
+                // LogError("Ignorance: Attempted to ClientSend when we're not initialized! (Please report this as a bug with a repro project. Might be Mirror being weird.)");
+                return false;
+            }
+
             Packet mailingPigeon = default;
 
             if (!m_Client.IsSet)
@@ -665,12 +709,21 @@ namespace Mirror
         /// New, "improved" server-side message processor. Multi messages per LateUpdate tick.
         /// </summary>
         /// <returns></returns>
-        public bool NewServerMessageProcessor()
+        public bool ProcessServerMessages()
         {
+            // 1.2.7: Never send any data if we're not initialized
+            // 1.2.7.1: I cucked this one up, I'm sorry
+            if (!AlreadyInitialized)
+            {
+                // 1.2.7.1: Shush, you!
+                // LogError("Ignorance: Attempted to ProcessServerMessages when we're not initialized! (Please report this as a bug with a repro project. Might be Mirror being weird.)");
+                return false;
+            }
+
             bool serverWasPolled = false;
             int deadPeerConnID, timedOutConnID, knownConnectionID;
             int newConnectionID = serverConnectionCnt;
-            Event networkEvent;
+            // Event networkEvent;
 
             // Don't attempt to process anything if the server is not active.
             if (!ServerActive()) return false;
@@ -680,7 +733,7 @@ namespace Mirror
 
             while (!serverWasPolled)
             {
-                if (m_Server.CheckEvents(out networkEvent) <= 0)
+                if (m_Server.CheckEvents(out Event networkEvent) <= 0)
                 {
                     if (m_Server.Service(0, out networkEvent) <= 0)
                         break;
@@ -695,13 +748,15 @@ namespace Mirror
                         break;
                     case EventType.Connect:
                         // A client connected to the server. Assign a new ID to them.
-                        if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: New client connection to server. Peer ID: {networkEvent.Peer.ID}, IP: {networkEvent.Peer.IP}");
+                        if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: New client connection to server. Address: {networkEvent.Peer.IP}:{networkEvent.Peer.Port}. (ENET Peer ID: {networkEvent.Peer.ID})");
 
                         // Map them into our dictonaries.
                         knownPeersToConnIDs.Add(networkEvent.Peer, newConnectionID);
                         knownConnIDToPeers.Add(serverConnectionCnt, networkEvent.Peer);
 
-                        if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: Peer ID {networkEvent.Peer.ID} is now known as connection ID {serverConnectionCnt}.");
+                        if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: Peer ID {networkEvent.Peer.ID} becomes connection ID {serverConnectionCnt}.");
+                        if (m_UseCustomTimeout) networkEvent.Peer.Timeout(Library.throttleScale, m_BasePeerTimeout, m_BasePeerTimeout * m_BasePeerMultiplier);
+
                         OnServerConnected.Invoke(serverConnectionCnt);
 
                         // Increment the connection counter.
@@ -712,13 +767,13 @@ namespace Mirror
 
                         if (knownPeersToConnIDs.TryGetValue(networkEvent.Peer, out deadPeerConnID))
                         {
-                            if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: Connection ID {knownPeersToConnIDs[networkEvent.Peer]} has disconnected.");
+                            if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: Connection ID {knownPeersToConnIDs[networkEvent.Peer]} ({networkEvent.Peer.IP}:{networkEvent.Peer.Port}) has disconnected.");
                             OnServerDisconnected.Invoke(deadPeerConnID);
                             PeerDisconnectedInternal(networkEvent.Peer);
                         }
                         else
                         {
-                            if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) LogWarning($"Ignorance: Unknown Peer with ID {networkEvent.Peer.ID} has disconnected. Hmm...");
+                            if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) LogWarning($"Ignorance: Unknown Peer with ID {networkEvent.Peer.ID} ({networkEvent.Peer.IP}:{networkEvent.Peer.Port}) has disconnected. Hmm...");
                         }
                         break;
                     case EventType.Receive:
@@ -727,14 +782,14 @@ namespace Mirror
                         // Only process data from known peers.
                         if (knownPeersToConnIDs.TryGetValue(networkEvent.Peer, out knownConnectionID))
                         {
-                            NewMessageDataProcessor(networkEvent.Packet, true, knownConnectionID);
+                            ProcessMessageData(networkEvent.Packet, true, knownConnectionID);
                         }
                         else
                         {
                             // Emit a warning and clean the packet. We don't want it in memory.
                             networkEvent.Packet.Dispose();
 
-                            if (m_TransportVerbosity > TransportVerbosity.Chatty) LogWarning("Ignorance WARNING: Discarded a packet because it was from a unknown peer. " +
+                            if (m_TransportVerbosity > TransportVerbosity.Chatty) LogWarning("Ignorance: Discarded a packet because it was from a unknown peer. " +
                                 "If you see this message way too many times then you are likely a victim of a (D)DoS attack that is targeting your server connection port." +
                                 " Ignorance will keep discarding packets but please do look into this. Failing to do so is risky and could potentially crash the server instance!");
                         }
@@ -768,27 +823,32 @@ namespace Mirror
         /// <param name="sourcePacket">The ENET Source packet.</param>
         /// <param name="serverInvoke">Is this intended to be invoked on the server instance?</param>
         /// <param name="connectionID">If it is intended to be invoked on the server, what connection ID to pass to Mirror?</param>
-        public void NewMessageDataProcessor(Packet sourcePacket, bool serverInvoke = false, int connectionID = 0)
+        public void ProcessMessageData(Packet sourcePacket, bool serverInvoke = false, int connectionID = 0)
         {
             if (m_TransportVerbosity == TransportVerbosity.Paranoid) Log($"Ignorance: Processing a {sourcePacket.Length} byte payload.");
 
-            // This will be improved on at a later date.
-            byte[] dataBuf = new byte[sourcePacket.Length];
-            // Copy our data into our buffers from ENET Native -> Ignorance Managed world.
-            sourcePacket.CopyTo(dataBuf);
-            sourcePacket.Dispose();
+            // 1.2.7: Drop if bigger than our buffer. Security risk otherwise.
+            if(sourcePacket.Length > packetCache.Length)
+            {
+                LogError($"Ignorance: Dropping incoming packet. Packet size is {sourcePacket.Length} byte, our buffer is {packetCache.Length} byte. We could be under attack.");
+                sourcePacket.Dispose();
+            }
 
-            if (m_TransportVerbosity == TransportVerbosity.LogSpam) Log($"Ignorance: Packet payload:\n{ BitConverter.ToString(dataBuf) }");
+            // Copy umanaged buffer into local managed packet buffer
+            sourcePacket.CopyTo(this.packetCache);
+            int spLength = sourcePacket.Length;
 
-            // Invoke the server if we're supposed to.
+            if (m_TransportVerbosity == TransportVerbosity.LogSpam) Log($"Ignorance: Packet payload:\n{ BitConverter.ToString(packetCache, 0, spLength) }");
+
             if (serverInvoke)
             {
-                OnServerDataReceived.Invoke(connectionID, dataBuf);
+                // Invoke the server if we're supposed to.
+                OnServerDataReceived.Invoke(connectionID, new ArraySegment<byte>(this.packetCache, 0, spLength));
             }
             else
             {
                 // Poke Mirror client instead.
-                OnClientDataReceived.Invoke(dataBuf);
+                OnClientDataReceived.Invoke(new ArraySegment<byte>(this.packetCache, 0, spLength));
             }
         }
 
@@ -796,8 +856,16 @@ namespace Mirror
         /// New "improved" client message processor.
         /// </summary>
         /// <returns>True if successful, False if not.</returns>
-        public bool NewClientMessageProcessor()
+        public bool ProcessClientMessages()
         {
+            // 1.2.7: Never send any data if we're not initialized
+            if (!AlreadyInitialized)
+            {
+                // 1.2.7.1: Silence, you!
+                // LogError("Ignorance: Attempted to ProcessClientMessages when we're not initialized! (Please report this as a bug with a repro project. Might be Mirror being weird.)");
+                return false;
+            }
+
             if (!IsValid(m_Client) || m_ClientPeer.State == PeerState.Uninitialized)
             {
                 return false;
@@ -811,7 +879,8 @@ namespace Mirror
             {
                 if (!IsValid(m_Client))
                 {
-                    if (m_TransportVerbosity >= TransportVerbosity.Paranoid) LogWarning("Ignorance: NewClientMessageProcessor() loop: client not valid.");
+                    // 1.2.5: Change this to only LogSpam setting.
+                    if (m_TransportVerbosity == TransportVerbosity.LogSpam) LogWarning("Ignorance: ProcessClientMessages() loop: client not valid.");
                     return false;
                 }
 
@@ -822,7 +891,7 @@ namespace Mirror
                 }
 
                 // Spam the logs if we're over paranoid levels.
-                if (m_TransportVerbosity == TransportVerbosity.Paranoid) LogWarning($"Ignorance: NewClientMessageProcessor() processing {networkEvent.Type} event...");
+                if (m_TransportVerbosity == TransportVerbosity.Paranoid) LogWarning($"Ignorance: ProcessClientMessages() processing {networkEvent.Type} event...");
 
                 switch (networkEvent.Type)
                 {
@@ -852,10 +921,10 @@ namespace Mirror
                         // Client recieving some data.
                         if (m_TransportVerbosity >= TransportVerbosity.Paranoid) Log($"Ignorance: Client data channel {networkEvent.ChannelID} is receiving {networkEvent.Packet.Length} byte payload.");
                         // Don't panic, data processing and invoking is done in a new function.
-                        NewMessageDataProcessor(networkEvent.Packet);
+                        ProcessMessageData(networkEvent.Packet);
                         break;
                     case EventType.Timeout:
-                        Log($"Ignorance: Connection timeout while communicating with Host Peer IP {networkEvent.Peer.IP}");
+                        Log($"Ignorance: Connection timed out while communicating with Host Peer IP {networkEvent.Peer.IP}");
                         OnClientDisconnected.Invoke();
                         break;
                 }
@@ -920,12 +989,13 @@ namespace Mirror
                 m_Server.Dispose();
             }
 
-            Library.Deinitialize();
-            Log("Ignorance shutdown complete. Have a good one.");
+            Log("Ignorance: Deinitializing ENET.");
+            DeinitializeENET();
+            Log("Ignorance: Shutdown complete. Have a good one.");
         }
-#endregion
+        #endregion
 
-#region Transport - Inherited functions from Mirror
+        #region Transport - Inherited functions from Mirror
         // Prettify the output string, rather than IgnoranceTransport (Mirror.IgnoranceTransport)
         public override string ToString()
         {
@@ -937,8 +1007,8 @@ namespace Mirror
         {
             if (enabled)
             {
-                NewServerMessageProcessor();
-                NewClientMessageProcessor();
+                ProcessServerMessages();
+                ProcessClientMessages();
             }
         }
 
@@ -962,8 +1032,8 @@ namespace Mirror
             }
             else
             {
-                LogWarning("Ignorance detected a configuration problem and will fix it for you. There needs to be at least 2 channels" +
-                    " added at any time, and they must be Reliable and Unreliable channel types respectively.");
+                LogWarning("Ignorance detected a configuration problem and will fix it for you. There needs to be at least 2 channels " +
+                    "added at any time, and they must be Reliable and Unreliable channel types respectively.");
 
                 m_ChannelDefinitions = new List<KnownChannelTypes>()
                 {
@@ -973,9 +1043,9 @@ namespace Mirror
             }
         }
 
-#endregion
+        #endregion
 
-#region Transport - Statistics
+        #region Transport - Statistics
         /// <summary>
         /// Server-world Packets Sent Counter, directly from ENET.
         /// </summary>
@@ -1030,9 +1100,9 @@ namespace Mirror
         {
             return m_ClientPeer.IsSet ? m_ClientPeer.PacketsLost : 0;
         }
-#endregion
+        #endregion
 
-#region Transport - Message Loggers
+        #region Transport - Message Loggers
         // Static helpers
         private void Log(object text)
         {
@@ -1048,9 +1118,9 @@ namespace Mirror
         {
             Debug.LogWarning(text);
         }
-#endregion
+        #endregion
 
-#region Transport - Toolbox
+        #region Transport - Toolbox
         /// <summary>
         /// Checks if a host object is valid.
         /// </summary>
@@ -1065,25 +1135,11 @@ namespace Mirror
         /// </summary>        
         public PacketFlags MapKnownChannelTypeToENETPacketFlag(KnownChannelTypes source)
         {
-            switch (source)
-            {
-                case KnownChannelTypes.Reliable:
-                    return PacketFlags.Reliable;            // reliable (tcp-like).
-                case KnownChannelTypes.ReliableUnsequenced:
-                    return (PacketFlags.Reliable | PacketFlags.Unsequenced);    //reliable, but unsequenced
-                case KnownChannelTypes.Unreliable:
-                    return PacketFlags.Unsequenced;         // completely unreliable.
-                case KnownChannelTypes.UnreliableFragmented:
-                    return PacketFlags.UnreliableFragment;  // unreliable fragmented.
-                case KnownChannelTypes.UnreliableSequenced:
-                    return PacketFlags.None;                // unreliable, but sequenced.
-                default:
-                    return PacketFlags.Unsequenced;
-            }
+            return (PacketFlags)source;
         }
-#endregion
+        #endregion
 
-#region Transport - Custom
+        #region Transport - Custom
         public enum TransportVerbosity
         {
             SilenceIsGolden,
@@ -1094,21 +1150,21 @@ namespace Mirror
 
         public class TransportInfo
         {
-            public const string Version = "1.2.4";
+            public const string Version = "1.2.7.1";
         }
 
         [Serializable]
         public enum KnownChannelTypes
         {
-            Reliable,
-            ReliableUnsequenced,
-            Unreliable,
-            UnreliableFragmented,
-            UnreliableSequenced,
+            Reliable = PacketFlags.Reliable,
+            ReliableUnsequenced = PacketFlags.Reliable | PacketFlags.Unsequenced,
+            Unreliable = PacketFlags.Unsequenced,
+            UnreliableFragmented = PacketFlags.UnreliableFragment,
+            UnreliableSequenced = PacketFlags.None
         }
-#endregion
+        #endregion
 
-#region UPnP - Automatic port forwarding
+        #region UPnP - Automatic port forwarding
 #if !IGNORANCE_NO_UPNP
         public async void DoServerPortForwarding()
         {
@@ -1123,7 +1179,7 @@ namespace Mirror
                 m_NATDiscoverer = new NatDiscoverer();
                 CancellationTokenSource cts = new CancellationTokenSource(m_ServerUPNPTimeout);
                 // Hello, router? It's-a me, Ignorance!
-                m_NATDevice = await m_NATDiscoverer.DiscoverDeviceAsync(PortMapper.Upnp, cts);
+                m_NATDevice = await m_NATDiscoverer.DiscoverDeviceAsync(PortMapper.Upnp | PortMapper.Pmp, cts);
                 // Get the external IP address...
                 System.Net.IPAddress externalIP = await m_NATDevice.GetExternalIPAsync();
                 if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden) Log($"Ignorance: Seems our external IP is {externalIP.ToString()}. Asking router to map local port {m_Port} to {externalIP.ToString()}:{m_Port}");
@@ -1154,32 +1210,57 @@ namespace Mirror
                 // Don't bother trying to do it again this server session.
                 m_HasAlreadyConfiguredNat = true;
             }
+            catch (NatDeviceNotFoundException)
+            {
+                if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden)
+                {
+                    LogError($"Ignorance: Sorry, automatic port fowarding has failed. The exception returned was: NAT Device Not Found (do you have a router with UPnP disabled?)");
+                }
+            }
+            catch (MappingException ex)
+            {
+                if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden)
+                {
+                    LogError($"Ignorance: Sorry, automatic port fowarding has failed. The exception returned was: NAT Device rejected the UPnP request. {ex}");
+                }
+            }
             catch (Exception ex)
             {
                 if (m_TransportVerbosity > TransportVerbosity.SilenceIsGolden)
                 {
-                    string error = string.Empty;
-                    if (ex.GetType() == typeof(Open.Nat.NatDeviceNotFoundException))
-                    {
-                        error = "NAT Device Not Found (do you have a router with UPnP disabled?)";
-                    }
-                    else if (ex.GetType() == typeof(Open.Nat.MappingException))
-                    {
-                        error = $"NAT Device rejected the UPnP request. {ex.ToString()}";
-                    }
-                    else
-                    {
-                        error = $"Unknown Exception: {ex.ToString()}";
-                    }
-
-                    LogError($"Ignorance: Sorry, automatic port fowarding has failed. The exception returned was: {error}");
+                    LogError($"Ignorance: Sorry, automatic port fowarding has failed. The exception returned was: Unknown Exception: {ex}");
                 }
             }
         }
 #endif
-#endregion
+        #endregion
 
         public ushort port { get { return m_Port; } set { m_Port = value; } }   // Backwards compatibility.
         public string Version { get { return TransportInfo.Version; } }
+
+        public ulong ClientGetBytesSentCount()
+        {
+            return m_ClientPeer.IsSet ? m_ClientPeer.BytesSent : 0;
+        }
+
+        public ulong ClientGetBytesReceivedCount()
+        {
+            return m_ClientPeer.IsSet ? m_ClientPeer.BytesReceived : 0;
+        }
+
+        private bool AlreadyInitialized = false;
+
+        private bool InitializeENET()
+        {
+            if (AlreadyInitialized) return true;
+            return Library.Initialize();
+        }
+
+        private void DeinitializeENET()
+        {
+            if (!AlreadyInitialized) return;
+            Library.Deinitialize();
+        }
+
     }
 }
