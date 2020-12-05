@@ -4,11 +4,11 @@ This repo runs nightly and formats Ignorance releases for UPM.  The Ignorance re
 
 # Dependencies
 
-## Mirror
+- Mirror
 
-Reccomended to install via [git upm repo](https://github.com/TCROC/Mirror-UPM.git).
+    - Reccomended to install via the [git upm repo](https://github.com/TCROC/Mirror-UPM.git).
 
-Should also be compatible with the [Asset Store](https://assetstore.unity.com/packages/tools/network/mirror-129321) and [Main Repo Releases](https://github.com/vis2k/Mirror/releases) but has not been tested. If anyone tests these out to verify, open up an issue and I'll update this README.
+    - Should also be compatible with the [Asset Store](https://assetstore.unity.com/packages/tools/network/mirror-129321) and [Main Repo Releases](https://github.com/vis2k/Mirror/releases) but it has not been tested. If anyone tests these out to verify, open up an issue and I'll update this README.
 
 # How To Use
 
